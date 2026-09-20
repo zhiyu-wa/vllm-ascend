@@ -88,7 +88,7 @@ class ACLGraphWrapper:
     """
 
     print(11)
-    
+    print(12)
     _all_instances: ClassVar[weakref.WeakSet["ACLGraphWrapper"]] = weakref.WeakSet()
 
     @classmethod
