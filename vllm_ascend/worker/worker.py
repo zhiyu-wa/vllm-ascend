@@ -565,6 +565,7 @@ class NPUWorker(WorkerBase):
         num_blocks = plan.get_num_blocks(available_bytes)
         return num_blocks * sum(spec.page_size_bytes for spec in plan.logical_cache_spec.values())
 
+    # 测显存
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
@@ -574,6 +575,7 @@ class NPUWorker(WorkerBase):
         Then, it calculates the free memory that can be used for KV cache in
         bytes.
         """
+        # 单位换算
         GiB = lambda b: b / GiB_bytes
 
         maybe_apply_startup_plan(self)
@@ -604,6 +606,7 @@ class NPUWorker(WorkerBase):
             self.init_snapshot,
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:
+            # 跑一次测显存
             self.model_runner.profile_run()
 
             # Record torch peak INSIDE the context and BEFORE graph capture,

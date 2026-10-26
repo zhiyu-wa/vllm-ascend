@@ -220,14 +220,19 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
         dict[str, torch.Tensor] | None,
     ]:
         """Refresh global draft mappings and prepare attention for replicated PCP."""
+        # 在“复制式 PCP（Context Parallel） + Prefill 阶段”下，为 draft 模型准备注意力所需的元数据和 KV cache slot 映射
+        # 刷新全局 draft 的 block table / slot mapping 默认缓冲区，然后根据 CUDA Graph 模式和注意力架构，决定是否重建 attention metadata 与按层 slot mappings
         input_batch = self.input_batch
         if attn_metadata is None or not self.replicated_pcp or input_batch is None:
+            # 原样返回
             return attn_metadata, slot_mappings
 
         assert isinstance(input_batch, AscendInputBatch)
         num_reqs = input_batch.num_reqs
         query_start_loc_np = input_batch.query_start_loc_np
         seq_lens_cpu = input_batch.seq_lens_cpu_upper_bound
+        # 刷新block_tables
+        # 按idx_mapping，按num_reqs_padded取
         if input_batch.is_dummy:
             # Replicated drafts need local dummy slots instead of target PCP slots.
             self.block_tables.get_dummy_block_tables(num_reqs_padded)

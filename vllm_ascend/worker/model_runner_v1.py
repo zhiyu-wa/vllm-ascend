@@ -1359,8 +1359,8 @@ class NPUModelRunner(GPUModelRunner):
 
     def _prepare_inputs(
         self,
-        scheduler_output: "SchedulerOutput",
-        num_scheduled_tokens: np.ndarray,
+        scheduler_output: "SchedulerOutput",    # 调度器的输出
+        num_scheduled_tokens: np.ndarray,       # 表示每个请求本步要算多少 token
     ) -> tuple[
         torch.Tensor,
         SpecDecodeMetadata | None,
@@ -1373,21 +1373,43 @@ class NPUModelRunner(GPUModelRunner):
             total_num_scheduled_tokens,
         ]
         """
+        # 每个请求本步要算多少 token
+        # num_scheduled_tokens [2,3,1]
+        # req_indices [0,0,1,1,1,2]
+        # cu_num_tokens [2,5,6]
+        # self.query_pos.np [0,1,0,1,2,0]
+
+        # 本步 query token 在展平 batch 中的起止边界
+        # self.query_start_loc = [0, 2, 5, 6]
+        
+        # 每个请求 KV cache 的总长度（历史 + 本步）
+        # 每个请求的长度，包括已计算token和新调度的token
+        # self.seq_lens = [num_computed_tokens[0] + 2, num_computed_tokens[1] + 3, num_computed_tokens[2] + 1]
+        # 若三个请求此前分别已计算了 [5, 8, 0] 个 token，则：
+        # seq_lens = [7, 11, 1]
+
+        # 全局计划 token 总数
         total_num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         assert total_num_scheduled_tokens > 0
+        # 当前批内请求数
         num_reqs = self.input_batch.num_reqs
         assert num_reqs > 0
 
         # OPTIMIZATION: Start copying the block table first.
         # This way, we can overlap the copy with the following CPU operations.
+        # 异步H2D 拷贝
+        # 把 KV block 表(页表)从 CPU 异步拷到 NPU
         self.input_batch.block_table.commit_block_table(num_reqs)
 
+        # 生成"token → 所属请求"映射
         req_indices = np.repeat(self.arange_np[:num_reqs], num_scheduled_tokens)
 
         # Get the attention state.
+        # 每请求"真实推进序列"的 token 数
         if not scheduler_output.scheduled_spec_decode_tokens:
             num_valid_tokens = num_scheduled_tokens
         else:
+            # 计划 token 里包含 draft token(它们不真正增加已计算长度)
             num_valid_tokens = np.array(
                 [
                     scheduler_output.num_scheduled_tokens[i]
@@ -1396,16 +1418,21 @@ class NPUModelRunner(GPUModelRunner):
                 ],
                 dtype=np.int32,
             )
+        
+        # AscendAttentionState
         attn_state = self._build_attn_state(num_reqs, num_scheduled_tokens, num_valid_tokens)
 
         # Determine if it's a splitfuse batch
+        # 批次中含 prefill
         with_prefill = attn_state not in [AscendAttentionState.DecodeOnly, AscendAttentionState.SpecDecoding]
         self.with_prefill = with_prefill
 
         # Get positions.
+        # 每请求计划 token 数的累加和
         cu_num_tokens = self._get_cumsum_and_arange(
             num_scheduled_tokens, self.query_pos.np
         )
+        # 该请求已计算 token 数 + 请求内偏移
         positions_np = self._positions_np_buf[:total_num_scheduled_tokens]
         np.add(
             self.input_batch.num_computed_tokens_cpu[req_indices],
@@ -1413,6 +1440,7 @@ class NPUModelRunner(GPUModelRunner):
             out=positions_np,
         )
 
+        # Decode Context Parallel
         if self.use_dcp:
             self.dcp_manager.init_batch_info(
                 num_scheduled_tokens,
@@ -1425,6 +1453,7 @@ class NPUModelRunner(GPUModelRunner):
         prev_req_id_to_index = self.input_batch.prev_req_id_to_index
         self._compute_prev_positions(num_reqs)
         prev_positions_gpu = None
+        # 异步调度
         if (
             self.use_async_scheduling
             and self.input_batch.prev_sampled_token_ids is not None
@@ -1433,6 +1462,7 @@ class NPUModelRunner(GPUModelRunner):
             self.prev_positions.copy_to_gpu(num_reqs)
             prev_positions_gpu = self.prev_positions.gpu[:num_reqs]
 
+        # DCP + MTP 投机输入生成
         if self.speculative_config and self.use_dcp:
             self.dcp_manager.generate_dcp_mtp_input(
                 total_num_scheduled_tokens,
@@ -1449,8 +1479,10 @@ class NPUModelRunner(GPUModelRunner):
                 prev_positions=prev_positions_gpu,
             )
 
+        # 包成 torch 张量,供 attention 元数据使用
         self.query_lens = torch.from_numpy(num_scheduled_tokens)
 
+        # input_ids 收集
         # Get token indices.
         # E.g., [0, 1, 0, 1, 2, 3, 4, 0, 1, 2]
         # -> [0, 1, M, M + 1, M + 2, M + 3, M + 4, 2 * M, 2 * M + 1, 2 * M + 2]
@@ -1513,12 +1545,14 @@ class NPUModelRunner(GPUModelRunner):
 
         self.query_start_loc.np[0] = 0
         self.query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
+        # 拷到 NPU
         self.query_start_loc.copy_to_gpu()
 
         # Now, query_start_loc is padded.
         # But gdn needs an unpadded one.
         # gdn_query_start_loc is an unpadded version of query_start_loc.
         # TODO delete it if fia's check is removed.
+        # Gated DeltaNet,混合线性注意力
         if self._has_gdn:
             self.gdn_query_start_loc.np[0] = 0
             self.gdn_query_start_loc.np[1 : num_reqs + 1] = cu_num_tokens
@@ -1535,6 +1569,8 @@ class NPUModelRunner(GPUModelRunner):
             torch.from_numpy(num_scheduled_tokens),
             out=self.optimistic_seq_lens_cpu[:num_reqs],
         )
+
+        # 已计算 + 本步计划
         self.optimistic_seq_lens_cpu[num_reqs:].fill_(0)
 
         # Fill unused with -1. Needed for reshape_and_cache in attention_cp
@@ -1568,6 +1604,7 @@ class NPUModelRunner(GPUModelRunner):
         self.discard_request_mask.np[:num_reqs] = discard_requests_mask
         self.discard_request_mask.copy_to_gpu(num_reqs)
 
+        # 混合模型(hybrid/GDN)
         # Sync num_accepted_tokens from CPU (set by
         # _update_states_after_model_execute for hybrid models).
         if self.num_accepted_tokens_event is not None:
@@ -1585,6 +1622,7 @@ class NPUModelRunner(GPUModelRunner):
         # CPU values are optimistic (all drafts accepted). The kernel
         # corrects on GPU using the previous step's
         # valid_sampled_token_count_gpu. Otherwise, just copy from CPU.
+        # GPU 侧 num_computed_tokens 修正
         valid_sampled_token_count_gpu = self.valid_sampled_token_count_gpu
         if self.use_async_spec_decode:
             computed_token_tensor_cpu = self.input_batch.num_computed_tokens_cpu_tensor[:num_reqs].to(
@@ -1612,6 +1650,7 @@ class NPUModelRunner(GPUModelRunner):
                 non_blocking=True,
             )
 
+        # 上卡
         self.req_indices.np[:total_num_scheduled_tokens] = req_indices
         self.req_indices.copy_to_gpu(total_num_scheduled_tokens)
         req_indices_gpu = self.req_indices.gpu[:total_num_scheduled_tokens]
@@ -1622,6 +1661,7 @@ class NPUModelRunner(GPUModelRunner):
         num_scheduled_tokens_gpu = self.num_scheduled_tokens.gpu[:num_reqs]
 
         dcp_manager = getattr(self, "dcp_manager", None)
+        # DCP 异步重建
         if dcp_manager is not None:
             cp_async_rebuild = dcp_manager.rebuild_async_spec_decode_inputs(
                 use_async_spec_decode=self.use_async_spec_decode,
@@ -1679,6 +1719,8 @@ class NPUModelRunner(GPUModelRunner):
                 + self.query_pos.gpu[:total_num_scheduled_tokens]
             )
 
+
+        # 设备侧每请求序列长度
         self.seq_lens[:num_reqs] = (
             self.num_computed_tokens[:num_reqs] + num_scheduled_tokens_gpu
         )

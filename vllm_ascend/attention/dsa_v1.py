@@ -1820,6 +1820,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         self.attn_sink = kwargs["attn_sink"]
 
         ascend_config = get_ascend_config()
+        # 多流处理
         self.multistream_dsv4_dsa_overlap = ascend_config.multistream_dsv4_dsa_overlap
 
     def _write_kv_cache(self, cache, kv, slot_mapping, *, quantize: bool):
@@ -1842,6 +1843,8 @@ class AscendDSAImpl(AttentionImplBase[Any]):
             return
         get_dsa_attn_kv_plan(self.vllm_config).dsa_kv_compress_scatter(cache, kv, slot_mapping)
 
+
+    # 2
     def _get_layer_metadata(
         self,
         attn_layer_name: str,
@@ -2015,6 +2018,7 @@ class AscendDSAImpl(AttentionImplBase[Any]):
         """Prepare cache updates and report whether local writes can be skipped."""
         return False
 
+    # 1
     def _get_o_proj_input_shape(
         self,
         attn_metadata: DSAMetadataDict | None,

@@ -166,6 +166,7 @@ class ModelAclGraphManager(ModelCudaGraphManager):
         self.breakable_cg_runner: BreakableACLGraphWrapper | None = None
         self.model_runner = model_runner
         self.update_stream = self.model_runner.update_stream
+        
         self.capture_sizes = collect_sorted_captured_token_sizes(self._capture_descs)
         if super().needs_capture():
             set_graph_params(self.capture_sizes)

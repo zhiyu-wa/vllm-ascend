@@ -147,6 +147,7 @@ def sp_padding_mask(
     num_tokens = hidden_states.shape[0]
     if is_padding is None:
         is_padding = hidden_states.new_zeros(num_tokens, dtype=torch.bool)
+    # 特化符号 不能跟 常量比
     assert is_padding.shape[0] == num_tokens
 
     return torch.ops.vllm.ascend_sp_padding_mask_impl(is_padding)

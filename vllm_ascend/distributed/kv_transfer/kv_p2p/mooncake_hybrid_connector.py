@@ -1421,7 +1421,9 @@ class MooncakeConnectorScheduler:
             return num_prompt_tokens - 1
         return num_prompt_tokens
 
+    #  hybrid 模型 留一个 token
     def _truncate_request_for_prefill(self, request: "Request") -> None:
+        #  Prefill 节点的“丢弃最后一个 token”优化
         """P-side only: drop the last prompt token so the prefiller computes
         h(N-1) instead of h(N). The decoder recomputes the last token to
         derive h(N) correctly.
