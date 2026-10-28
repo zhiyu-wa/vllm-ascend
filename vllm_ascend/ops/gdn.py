@@ -243,6 +243,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             return True
         return cls._probe_fused_chunk()
 
+    # 切块，块内并行
     @staticmethod
     def _chunk_gated_delta_rule_fused(
         q: torch.Tensor,
@@ -340,10 +341,15 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         """
         num_tokens = hidden_states.size(0)
         if hasattr(self, "in_proj_qkv"):
+            # 投影出 q/k/v
             mixed_qkv, _ = self.in_proj_qkv(hidden_states)
+            # 投影出 β/α
             ba, _ = self.in_proj_ba(hidden_states)
+            # 投影出 z 第6条
             z, _ = self.in_proj_z(hidden_states)
+            # 把它整理成 [seq, 64, 128]，和 V 逐维对齐
             z = z.reshape(z.size(0), -1, self.head_v_dim)
+            # 切tp
             b, a = self._split_ba_for_tp(ba)
             b = b.contiguous()
             a = a.contiguous()
@@ -379,12 +385,15 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Note: we should not use torch.empty here like other attention backends,
         # see discussions in https://github.com/vllm-project/vllm/pull/28182
+        
+        # Gated Delta Rule
         core_attn_out = torch.zeros(
             (num_tokens, self.num_v_heads // self.tp_size, self.head_v_dim),
             dtype=hidden_states.dtype,
             device=hidden_states.device,
         )
 
+        # 自定义算子，内部调用_forward_core
         torch.ops.vllm.qwen_gdn_attention_core(
             mixed_qkv,
             b,
@@ -401,9 +410,12 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         # Reshape input data into 2D tensor
         core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
         z = z.reshape(-1, z.shape[-1])
+        
+        # RMSNorm 
         core_attn_out = self.norm(core_attn_out, z)
         core_attn_out = core_attn_out.reshape(z_shape_og)
         core_attn_out = rearrange(core_attn_out, "... h d -> ... (h d)")
+        # concat 
         out, _ = self.out_proj(core_attn_out)
         if output is not None:
             output[:num_tokens] = out
@@ -442,7 +454,13 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         non_spec_token_indx = attn_metadata.non_spec_token_indx
         spec_state_indices_tensor = attn_metadata.spec_state_indices_tensor  # noqa: E501
         non_spec_state_indices_tensor = attn_metadata.non_spec_state_indices_tensor  # noqa: E501
+        # 每序列持久状态管理器
+        # Attention 层 → 放 K、V（真的 KV）
+        # GDN 层 → 放 conv_state、ssm_state（不是 KV， KV已经被扔掉）
         self_kv_cache = self.kv_cache
+        # S
+        # State Space Model state
+        # 状态递推
         ssm_state = self_kv_cache[1]
         num_actual_tokens = attn_metadata.num_actual_tokens
 
@@ -527,6 +545,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         self_kv_cache[0][prefill_cache_indices, :state_len, :] = all_last_width_prefill_x[
                             pcp_rank - 1, ...
                         ].transpose(-1, -2)
+                    # 卷积
                     mixed_qkv_non_spec_output = causal_conv1d_fn(
                         mixed_qkv_non_spec,
                         conv_weights_T,
@@ -535,6 +554,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         query_start_loc=query_start_loc_opt,
                         cache_indices=_normalize_causal_cache_indices(cache_indices_opt),
                         has_initial_state=initial_state_mode_opt,
+                        # causal_conv1d_fn
                         activation="silu" if self.activation else None,
                         pad_slot_id=PAD_SLOT_ID,
                         null_block_id=0,
@@ -575,6 +595,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         cache_indices_opt = cache_indices_opt[num_decodes:]
                         if initial_state_mode_opt is not None:
                             initial_state_mode_opt = initial_state_mode_opt[num_decodes:]
+                    # 卷积
                     mixed_qkv_non_spec_output = causal_conv1d_fn(
                         mixed_qkv_non_spec,
                         conv_weights_T,
@@ -583,6 +604,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                         query_start_loc=query_start_loc_opt,
                         cache_indices=_normalize_causal_cache_indices(cache_indices_opt),
                         has_initial_state=initial_state_mode_opt,
+                        # 卷积后接 SiLU
                         activation="silu" if self.activation else None,
                         pad_slot_id=PAD_SLOT_ID,
                         null_block_id=0,
@@ -593,6 +615,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             non_spec_causal_conv1d_meta = attn_metadata.non_spec_decode_metadata.causal_conv1d
             non_spec_query_start_loc_device = non_spec_causal_conv1d_meta.query_start_loc
             output_non_spec = torch.empty_like(mixed_qkv_non_spec)
+            # 算子调用
             output_non_spec = causal_conv1d_update(
                 mixed_qkv_non_spec,
                 self_kv_cache[0],
@@ -610,6 +633,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             mixed_qkv_non_spec = None
 
         if mixed_qkv_spec is not None:
+            # 算子调用
             query_spec, key_spec, value_spec = _rearrange_decode_qkv(
                 mixed_qkv_spec,
                 self.key_dim // self.tp_size,
@@ -637,6 +661,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             query_non_spec, key_non_spec, value_non_spec = self.rearrange_mixed_qkv(mixed_qkv_non_spec)
 
         # 2. Recurrent attention
+        # α/β 
+        # 算子调用
         g, beta = DeviceOperator.fused_gdn_gating(self.A_log, a, b, self.dt_bias)
         if spec_sequence_masks is not None:
             if attn_metadata.num_prefills == 0 and attn_metadata.num_decodes == 0:
@@ -661,6 +687,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
         num_decode_tokens = attn_metadata.num_decode_tokens
 
         # 2.1: Process the multi-query part
+        # L2 归一化
+        # Q/K 做 L2，V 不做
         if spec_sequence_masks is not None:
             actual_seq_lengths = attn_metadata.spec_decode_metadata.actual_seq_lengths
             query_spec = l2norm_fwd(query_spec)
@@ -709,6 +737,8 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             core_attn_out_decode = None
 
         # 2.3: Process the remaining part
+        # Prefill阶段
+        # 传副本，算完再 scatter
         if attn_metadata.num_prefills > 0:
             prefill_query_start_loc = attn_metadata.prefill_query_start_loc
             prefill_state_indices = attn_metadata.prefill_state_indices
@@ -718,6 +748,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             assert prefill_has_initial_state is not None
             assert g_non_spec is not None
             assert beta_non_spec is not None
+            
             if split_non_spec:
                 if not split_conv:
                     query_non_spec = query_non_spec[:, num_decode_tokens:]
@@ -733,12 +764,16 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
             # The built-in fused operator is NPU-only. Keep CPU/unit-test
             # dispatch on the Triton-compatible path even when its availability
             # probe was cached globally.
+            
+            # GDR后端三选一
             use_fused_chunk = (
                 fla_gdn_prefill_op is None
                 and query_non_spec.device.type != "cpu"
                 and AscendGatedDeltaNetAttention._probe_fused_chunk()
                 and get_pcp_group().world_size == 1
             )
+
+            # fla_npu 融合算子
             if fla_gdn_prefill_op is not None:
                 initial_state = gather_ssm_states(
                     ssm_state,
@@ -761,6 +796,7 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     prefill_state_indices,
                     last_recurrent_state.to(ssm_state.dtype).contiguous(),
                 )
+            # torch_npu.npu_chunk_gated_delta_rule
             elif use_fused_chunk:
                 # Gather only the selected rows. Generic advanced indexing first
                 # materializes the complete cache when ssm_state has a padded
@@ -788,8 +824,10 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                     prefill_state_indices,
                     last_recurrent_state,
                 )
+            # Triton 兜底
             else:
                 initial_state = ssm_state[prefill_state_indices].transpose(-1, -2).contiguous()
+                # 手动新序列清零
                 clear_ssm_states(initial_state, prefill_has_initial_state)
                 (core_attn_out_non_spec, last_recurrent_state) = chunk_gated_delta_rule(
                     q=query_non_spec,
@@ -807,19 +845,24 @@ class AscendGatedDeltaNetAttention(GatedDeltaNetAttention):
                 ssm_state[prefill_state_indices] = (
                     last_recurrent_state.transpose(-1, -2).contiguous().to(ssm_state.dtype)
                 )
+            
             if split_non_spec:
                 core_attn_out_non_spec = torch.cat(
                     [core_attn_out_decode, core_attn_out_non_spec],
                     dim=1,
                 )
+        # Decode阶段
         elif attn_metadata.num_decodes > 0:
+            # 算子调用
             actual_seq_lengths = attn_metadata.non_spec_decode_metadata.actual_seq_lengths
             query_non_spec = l2norm_fwd(query_non_spec)
             key_non_spec = l2norm_fwd(key_non_spec)
+            # GDR
             core_attn_out_non_spec = recurrent_gated_delta_rule(
                 query_non_spec.squeeze(0),
                 key_non_spec.squeeze(0),
                 value_non_spec.squeeze(0),
+                # 传本体
                 ssm_state,
                 g=g_non_spec.squeeze(0) if g_non_spec is not None else g_non_spec,
                 beta=beta_non_spec.squeeze(0) if beta_non_spec is not None else beta_non_spec,

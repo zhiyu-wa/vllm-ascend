@@ -444,7 +444,7 @@ class AscendRoutedExperts(RoutedExperts):  # type: ignore[no-redef]
         self.ascend_pertoken_scale: torch.Tensor | None = None
         self.ascend_mc2_mask: torch.Tensor | None = None
         if not self._use_v2_model_runner:
-            self.init_eplb(n_shared_experts)
+            self.init_eplb(n_shared_experts)a
         self.return_with_event = False
 
         runner_type = getattr(vllm_config.model_config, "runner_type", None)
