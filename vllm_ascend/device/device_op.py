@@ -1882,6 +1882,7 @@ class A5DeviceAdaptor(BaseDeviceAdaptor):
 
         return Ad
 
+    # aclnnAdds_AddAiCore_Add    
     @staticmethod
     def npu_gemma_rms_norm(x, weight, variance_epsilon):
         x, _ = torch_npu.npu_rms_norm(x, 1.0 + weight, variance_epsilon)

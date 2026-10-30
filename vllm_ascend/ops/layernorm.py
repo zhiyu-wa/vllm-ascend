@@ -87,6 +87,7 @@ class AscendRMSNorm(RMSNorm):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         import torch_npu
 
+        # 有残差，走融合算子
         if residual is not None:
             import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415
 
@@ -95,7 +96,8 @@ class AscendRMSNorm(RMSNorm):
                 x, residual, self.weight, self.bias, self.variance_epsilon
             )
             return x, residual
-
+        
+        # 无残差，第一层，只RMSNorm
         x, residual = torch_npu.npu_rms_norm(x, self.weight, self.variance_epsilon)
         if self.bias_loaded:
             x.add_(self.bias)
@@ -111,6 +113,7 @@ class AscendGemmaRMSNorm(GemmaRMSNorm):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         import torch_npu
 
+        # 有残差，走融合算子
         if residual is not None:
             if enable_custom_op():
                 x, _, residual = torch.ops._C_ascend.npu_add_rms_norm_bias(
