@@ -3373,6 +3373,9 @@ class NPUModelRunner(GPUModelRunner):
                         **self._get_engram_device_inputs(),
                     )
                 )
+
+        #run_model == self.model(model_inputs) == self.model.__call__(model_inputs) # python 魔术方法
+
         run_model = partial(self.model, **model_inputs)
 
         try:
@@ -3381,6 +3384,7 @@ class NPUModelRunner(GPUModelRunner):
                 self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
                 hidden_states = run_model()
             else:
+                # 
                 hidden_states = run_model()
                 self._update_full_graph_params_if_needed(forward_context, num_tokens_padded)
         finally:
