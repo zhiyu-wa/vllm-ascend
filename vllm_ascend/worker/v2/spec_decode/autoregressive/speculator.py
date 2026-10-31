@@ -388,6 +388,7 @@ class AscendAutoRegressiveSpeculator(LmheadTPDraftSamplingMixin, AutoRegressiveS
             # discriminator and cache it for ACL graph parameter updates.
             self.attn_backend = _get_graph_update_backend(self.attn_groups)
         if issubclass(self.attn_backend, AscendDSABackend):
+            # attn结构，用于构建注意力元数据的判断
             self.attn_architecture = "DSA"
         elif issubclass(self.attn_backend, AscendMLABackend):
             self.attn_architecture = "MLA"
