@@ -192,20 +192,30 @@ def _align_hybrid_attention_page_sizes(kv_cache_specs: dict[str, KVCacheSpec]) -
 
 
 def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
+    # 构建 KV Cache Spec 
     """Build Ascend-specific KV cache specs for v2 worker patching."""
     from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
-
+    
+    # 是否使用 TurboQuant 量化
     use_turboquant = vllm_config.cache_config.cache_dtype == TURBOQUANT_CACHE_DTYPE
+
+    # 注意力层的spec字典
     kv_cache_spec: dict[str, KVCacheSpec] = {}
     attention_layer_names: list[str] = []
+    # 暂存 Mamba 层的 spec
     mamba_specs: dict[str, MambaSpec] = {}
+    
+    # 以注意力基类层，抓取所有注意力相关层
     layer_type = AttentionLayerBase
     attn_layers = get_layers_from_vllm_config(vllm_config, layer_type)
+    
+    #  DCP
     sfa_dcp_replicated_indexer_size = (
         vllm_config.parallel_config.decode_context_parallel_size
         if enable_sfa_dcp_replicated_indexer(vllm_config)
         else 1
     )
+    # C8 压缩缓存
     enable_sparse_li_c8 = vllm_config.attention_config.indexer_kv_dtype in ["fp8", "int8"]
     if enable_sparse_li_c8:
         c8_k_cache_dtype = kv_cache_dtype_str_to_dtype(
@@ -215,17 +225,34 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             c8_k_scale_cache_dtype = torch.float32
         elif c8_k_cache_dtype == torch.int8:
             c8_k_scale_cache_dtype = torch.float16
-
     c8_cache_dtype = kv_cache_dtype_str_to_dtype(vllm_config.cache_config.cache_dtype, vllm_config.model_config)
 
+    # 逐层构建 spec
     for layer_name, attn_module in attn_layers.items():
+        # 该层配置了 KV 共享
         if getattr(attn_module, "kv_sharing_target_layer_name", None):
             continue
-
+        
+        # 拿到上游 vLLM 的各层 标准的spec
+        """
+        layer_name language_model.model.layers.35.self_attn.attn
+        attn_module Attention(head_size=256, num_heads=8, num_kv_heads=1, scale=0.0625, backend=AscendAttentionBackendImpl)
+        
+        layer_name language_model.model.layers.36.linear_attn
+        attn_module QwenGatedDeltaNetAttention(
+            (conv1d): AscendColumnParallelLinear(in_features=4, output_features=4096, bias=False, tp_size=2, gather_output=False)
+            (in_proj_qkvz): AscendMergedColumnParallelLinear(in_features=2048, output_features=6144, bias=False, tp_size=2, gather_output=False)
+            (in_proj_ba): AscendMergedColumnParallelLinear(in_features=2048, output_features=32, bias=False, tp_size=2, gather_output=False)
+            (norm): AscendRMSNormGated()
+            (out_proj): AscendRowParallelLinear(in_features=2048, output_features=2048, bias=False, tp_size=2, reduce_results=True)
+            (chunk_gated_delta_rule): ChunkGatedDeltaRule()
+        )
+        """
         spec = attn_module.get_kv_cache_spec(vllm_config)
         if spec is None:
             continue
-
+        
+        # 如果是 Mamba/GDN spec，不放进主字典
         if isinstance(spec, MambaSpec):
             # Keep Mamba groups after attention groups. Ascend graph parameter
             # updates rely on this stable backend ordering.
@@ -254,9 +281,11 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 dtype = c8_cache_dtype
                 cache_dtype_str = vllm_config.cache_config.cache_dtype
             else:
+                # 普通 MLA，一切沿用上游 spec 的原值
                 head_size = spec.head_size
                 dtype = spec.dtype
                 cache_dtype_str = spec.cache_dtype_str
+            
             model_version = spec.model_version or getattr(attn_module, "model_version", None)
             indexes_kv_by_block_stride = bool(
                 getattr(spec, "indexes_kv_by_block_stride", False)
@@ -264,6 +293,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             )
             compression_ratio = get_kv_cache_compression_ratio(spec)
             ratio_kwargs: dict[str, Any] = {"tokens_per_state": compression_ratio}
+            # 构造 Ascend 版 MLA spec
             spec = AscendMLAAttentionSpec(
                 block_size=spec.block_size,
                 # ``num_heads`` describes physical cache head slots, not query
@@ -287,6 +317,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
                 indexes_kv_by_block_stride=indexes_kv_by_block_stride,
                 **ratio_kwargs,
             )
+        # Indexer 分支
         if isinstance(attn_module, DeepseekV32IndexerCache):
             if not getattr(
                 getattr(attn_layers.get(layer_name.replace(".indexer.k_cache", ".attn")), "impl", None),
@@ -340,6 +371,7 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
         for layer_name, spec in mamba_specs.items():
             if spec.page_size_bytes < common_page_size:
                 mamba_specs[layer_name] = replace(spec, page_size_padded=common_page_size)
+        # 最后才把 Mamba spec 合并进主字典
         kv_cache_spec.update(mamba_specs)
 
     return kv_cache_spec
