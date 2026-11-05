@@ -6469,12 +6469,16 @@ class NPUModelRunner(GPUModelRunner):
         Returns:
             KVCacheSpec: A dictionary mapping layer names to their KV cache
             format. Layers that do not need KV cache are not included.
+        遍历静态 forward 上下文中的所有注意力类模块，为每个需要 KV cache 的层生成一个 KVCacheSpec
+        键为层名（如 "model.layers.0.self_attn"），值为该层的缓存规
         """
 
+        # 启用了 EC（Encoder Cache）传输且当前实例不是消费者
         if has_ec_transfer() and not get_ec_transfer().is_consumer:
             return {}
 
         kv_cache_spec: dict[str, KVCacheSpec] = {}
+        # 创建结果字典
         attn_layers = get_layers_from_vllm_config(self.vllm_config, AttentionLayerBase)
         from vllm.model_executor.models.deepseek_v2 import DeepseekV32IndexerCache
 
@@ -6483,6 +6487,8 @@ class NPUModelRunner(GPUModelRunner):
         mamba_layers: dict[str, MambaBase] = {}
         attn_layer_names = set()
         for layer_name, attn_module in attn_layers.items():
+            # 层名、注意力模块
+            # 跨层 KV 共享
             if (isinstance(attn_module, Attention)
                     and (kv_tgt_layer := attn_module.kv_sharing_target_layer_name) is not None):
                 # The layer doesn't need its own KV cache and will use that of
@@ -6494,18 +6500,22 @@ class NPUModelRunner(GPUModelRunner):
                 # or enable more requests to be processed simultaneously.
                 self.shared_kv_cache_layers[layer_name] = kv_tgt_layer
                 continue
+            # DeepSeek-V4.1 压缩缓存层
             elif isinstance(attn_module, v41_cache_layer_type):
                 kv_cache_spec[layer_name] = attn_module.get_kv_cache_spec(self.vllm_config)
+            # 压缩注意力
             elif self.use_compress:
                 # Skip modules that don't need KV cache (eg encoder-only attention)
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
+            # 普通 Attention（GQA/MHA）
             elif isinstance(attn_module, Attention):
                 if spec := attn_module.get_kv_cache_spec(self.vllm_config):
                     if self._is_c8_mxfp_kv_cache(spec):
                         spec = mxfp_cache_spec(spec)
                     kv_cache_spec[layer_name] = spec
                     attn_layer_names.add(layer_name)
+            # MLAAttention
             elif isinstance(attn_module, MLAAttention):
                 if self.use_sparse or getattr(
                     getattr(attn_module, "impl", None), "enable_sparse_sfa_c8", False
@@ -6596,6 +6606,7 @@ class NPUModelRunner(GPUModelRunner):
                     )
                     attn_layer_names.add(layer_name)
 
+            # DeepSeek V3.2 稀疏索引器缓存
             elif isinstance(attn_module, DeepseekV32IndexerCache):
                 if not getattr(
                     getattr(attn_layers.get(layer_name.replace(".indexer.k_cache", ".attn")), "impl", None),
@@ -6630,9 +6641,11 @@ class NPUModelRunner(GPUModelRunner):
                     sfa_dcp_replicated_indexer_size=self.sfa_dcp_replicated_indexer_size,
                 )
 
+            # Mamba/GDN 层 —— 只收集不处理
             elif isinstance(attn_module, MambaBase):
                 mamba_layers[layer_name] = attn_module
 
+            # 投机解码草稿模型的隐状态缓存
             elif isinstance(attn_module, CacheOnlyAttentionLayer):
                 # Only CacheOnlyAttentionLayer (extract_hidden_states draft model)
                 # is handled here.
@@ -6659,14 +6672,23 @@ class NPUModelRunner(GPUModelRunner):
                 ):
                     attn_layer_names.add(layer_name)
 
+        # Mamba 页对齐后处理
         if len(mamba_layers) > 0:
             mamba_page_size_padded = 0
+            
+            # 遍历所有 mamba 层
             for layer_name, mamba_module in mamba_layers.items():
+                # 向每层要它的 kv_cache_spec
                 if spec := mamba_module.get_kv_cache_spec(self.vllm_config):
                     kv_cache_spec[layer_name] = spec
+                    # mamba 的页大小 page_size_bytes
+                    # 取最后一个 mamba 层的值
                     mamba_page_size_padded = spec.page_size_bytes
+            
+            # 遍历所有 attention 层
             # align attn_page_size to mamba_page_size_padded
             for layer_name in attn_layer_names:
+                # 某个 attention 层自己的页大小比 mamba 的小，就把它的 page_size_padded 强制设为 mamba 的页
                 if kv_cache_spec[layer_name].page_size_bytes < mamba_page_size_padded:  # type: ignore[attr-defined]
                     object.__setattr__(kv_cache_spec[layer_name], "page_size_padded", mamba_page_size_padded)
 

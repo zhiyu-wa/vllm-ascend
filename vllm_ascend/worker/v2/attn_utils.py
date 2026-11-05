@@ -362,15 +362,23 @@ def get_kv_cache_spec(vllm_config: VllmConfig) -> dict[str, KVCacheSpec]:
             continue
 
     if mamba_specs:
+        # 对齐 attention 层内部
         _align_hybrid_attention_page_sizes(kv_cache_spec)
+        
+        # 取所有 attention spec 和所有 mamba spec 的真实页大小的最大值
         common_page_size = max(spec.page_size_bytes for spec in (*kv_cache_spec.values(), *mamba_specs.values()))
+        
+        # pad attention
         for layer_name in attention_layer_names:
             spec = kv_cache_spec[layer_name]
             page_size_padded = common_page_size if spec.page_size_bytes < common_page_size else spec.page_size_padded
             kv_cache_spec[layer_name] = replace(spec, page_size_padded=page_size_padded)
+        
+        # pad mamba
         for layer_name, spec in mamba_specs.items():
             if spec.page_size_bytes < common_page_size:
                 mamba_specs[layer_name] = replace(spec, page_size_padded=common_page_size)
+        
         # 最后才把 Mamba spec 合并进主字典
         kv_cache_spec.update(mamba_specs)
 
