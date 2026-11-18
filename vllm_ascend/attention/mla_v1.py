@@ -935,12 +935,14 @@ class AscendMLAImpl(MLAAttentionImpl):
         vllm_config=None,
         speculative_config=None,
         draft_attn_metadatas=None,
-    ):
+    ):  
         if _EXTRA_CTX.is_draft_model:
             if _EXTRA_CTX.is_draft_model_prefill:
                 graph_params = get_draft_graph_prefill_params()
             else:
                 graph_params = get_draft_graph_params()
+            
+            # 拿到注意力数据
             attn_metadata = draft_attn_metadatas
             # mla_graph_keys_filter: hybrid models such as GLM-5.3-Flash put KDA
             # layers in the same metadata dict, but only MLA layers contribute a
@@ -948,18 +950,24 @@ class AscendMLAImpl(MLAAttentionImpl):
             # pairs MLA params with KDA layer names.
             attn_keys = [k for k in attn_metadata[0] if getattr(attn_metadata[0][k], "decode", None) is not None]
         else:
+            # 
             graph_params = get_graph_params()
             attn_metadata = forward_context.attn_metadata
             attn_keys = [k for k in attn_metadata if getattr(attn_metadata[k], "decode", None) is not None]
+        
+
         # FIXME: Behold! We are using a temporary hack here to update the args
         # for each layer's attention op in the graph.
         num_layers = len(attn_keys)
         if num_layers == 0:
             return
+        
         if _EXTRA_CTX.is_draft_model:
             attn_keys = attn_keys * (len(graph_params.attn_params[num_tokens]) // num_layers)
         attn_count = 0
+        
         with torch.npu.stream(update_stream):
+            # 全部取出来
             for key, param, handle, event in zip(
                 attn_keys,
                 graph_params.attn_params[num_tokens],
@@ -979,13 +987,15 @@ class AscendMLAImpl(MLAAttentionImpl):
                     scale,
                     block_table,
                     block_size,
-                    seq_lens_list,
+                    seq_lens_list, # 旧的参数
                     actual_seq_lengths,
                     attn_output,
                     softmax_lse,
                     dequant_scale_q_nope,
                     fak_descale_float,
                 ) = param
+
+
                 if _EXTRA_CTX.is_draft_model:
                     draft_step = attn_count // num_layers
                     attn_metadata_current = attn_metadata[draft_step]
@@ -994,12 +1004,16 @@ class AscendMLAImpl(MLAAttentionImpl):
                     attn_metadata_current = attn_metadata
 
                 layer_metadata = attn_metadata_current[key]
+
+                # 新的参数
                 seq_lens_list = layer_metadata.decode.seq_lens_list
+                # 非草稿模型
                 if speculative_config and speculative_config.use_eagle() and not _EXTRA_CTX.is_draft_model:
                     actual_seq_lengths = layer_metadata.decode.actual_seq_lengths_q
                     spec_multiple = speculative_config.num_speculative_tokens + 1
                     seq_lens_list = seq_lens_list + [0] * (num_tokens // spec_multiple - len(seq_lens_list))
                     actual_seq_lengths = [spec_multiple * (i + 1) for i in range(num_tokens // spec_multiple)]
+                # 草稿模型
                 elif _EXTRA_CTX.is_draft_model:
                     actual_seq_lengths = layer_metadata.decode.actual_seq_lengths_q
                     block_table = layer_metadata.decode.block_table
@@ -1007,7 +1021,9 @@ class AscendMLAImpl(MLAAttentionImpl):
                     if speculative_config.disable_padded_drafter_batch:
                         block_table = block_table[: len(actual_seq_lengths)]
                     seq_lens_list = seq_lens_list + [0] * (len(actual_seq_lengths) - len(seq_lens_list))
+                # 非草稿模型
                 else:
+                    # padding
                     seq_lens_list = seq_lens_list + [0] * (num_tokens - len(seq_lens_list))
 
                 extra_args = {}
@@ -2380,28 +2396,45 @@ class AscendMLAImpl(MLAAttentionImpl):
         x = torch_npu.npu_interleave_rope(x, cos, sin)
         return x.view(B, N, D)
 
+    # 注意力前向
     def _forward_decode(
         self,
         decode_preprocess_res: DecodeMLAPreprocessResult,
         block_size: int,
         attn_metadata: AscendMLAMetadata,
     ) -> torch.Tensor:
+        
+        # 取出 MLA 分解后的四个张量
         q_nope = decode_preprocess_res.ql_nope
+        # pe 位置编码
         q_pe = decode_preprocess_res.q_pe
+
         k_nope = decode_preprocess_res.k_nope
         k_pe = decode_preprocess_res.k_pe
+
+        # 检查
         assert q_nope is not None and q_pe is not None
         assert k_nope is not None and k_pe is not None
+        
+        # query 的反量化缩放因子
         dequant_scale_q_nope = decode_preprocess_res.dequant_scale_q_nope
+        
+        # decode 专属元数据
         decode_meta = attn_metadata.decode
         assert decode_meta is not None
+        
         # TODO: The CANN package is expected to support num_heads that are not
         # powers of 2 in 2026 Q2. Once supported, all padding operations under
         # `if self.head_padding > 0` in this function can be removed.
+        # token数
         num_tokens = q_nope.size(0)
         # shape of knope/k_pe for npu graph mode should be:
         # [num_blocks, num_kv_heads, block_size, self.kv_lora_rank/self.qk_rope_head_dim]
+        
+        # 无变长 query 前缀和
         actual_seq_lengths = None
+        
+        #  KV cache 的三种内存布局
         if self.fa_quant_layer and not self.support_fp8_attention:
             nz_fmt_last_dim = 16
             k_nope = k_nope.view(
@@ -2432,9 +2465,12 @@ class AscendMLAImpl(MLAAttentionImpl):
             else:
                 k_pe = k_pe.view(-1, self.num_kv_heads, block_size, self.qk_rope_head_dim)
 
+        # 形状变量
         attn_output_shape: tuple | None = None
         # TODO: Drop SpecDecoding after V1/310P MTP paths use DecodeOnly and
         # verify that their FIA query layout still matches graph capture.
+        
+        # 投机解码/短 prefill 类状态
         if (
             attn_metadata.attn_state
             in [
@@ -2448,29 +2484,45 @@ class AscendMLAImpl(MLAAttentionImpl):
             # The right part layout indicates the layout of the attention
             # output. It is set to NTD to avoid the need for a transpose
             # operation after attention.
+            # 输入 TND
             input_layout = "TND_NTD"
+            
             # TODO: If the driver is upgraded later, the contiguous function can be deleted.
             # Input shape: [num_tokens, num_heads, dim]
+            
+            # view
             q_nope = q_nope.view(num_tokens, self.num_heads, -1).contiguous()
             q_pe = q_pe.view(num_tokens, self.num_heads, -1)
+
             if self.head_padding > 0:
                 q_pe = F.pad(q_pe, (0, 0, 0, self.head_padding), "constant", 0)
                 q_nope = F.pad(q_nope, (0, 0, 0, self.head_padding), "constant", 0)
+            
             # Output shape: [num_heads, num_tokens, dim]
+            # 输出形状
             attn_output_shape = (self.num_heads_padded, num_tokens, self.kv_lora_rank)
+            
+            # 非因果
             if not attn_metadata.causal:
                 # K3's DSpark draft block is bidirectional. With FIA this is
                 # sparse_mode=0 and no mask; a default mask here would hide the
                 # upper triangle and silently make the draft causal.
+                # 不带 mask
                 sparse_mode = 0
                 attn_mask = None
             else:
+                # 带 mask
                 sparse_mode = 3
                 attn_mask = decode_meta.attn_mask
+            
+            # 前缀和
             actual_seq_lengths = decode_meta.actual_seq_lengths_q
+            
             if self.fa_quant_layer:
                 assert dequant_scale_q_nope is not None
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, self.num_heads)
+        
+        # 普通 decode 下的 FP8 量化层
         elif self.fa_quant_layer:
             attn_mask = None
             sparse_mode = 0
@@ -2495,6 +2547,7 @@ class AscendMLAImpl(MLAAttentionImpl):
                 assert dequant_scale_q_nope is not None
                 dequant_scale_q_nope = dequant_scale_q_nope.view(num_tokens, 1, self.num_heads)
                 attn_output_shape = (self.num_heads_padded, num_tokens, 1, self.kv_lora_rank)
+        # 不支持原生 FP8 时走 BSND 输入、NBSD 输出
         else:
             # The output layout is set to NBSD to eliminate the need for a
             # transpose operation after attention.
@@ -2521,6 +2574,7 @@ class AscendMLAImpl(MLAAttentionImpl):
 
         # mla_nope_zero_rope64: FIA MLA requires rope D=64. All-zero rope
         # keeps NoPE scores and stays on the kv_lora_rank=512 MLA kernel.
+        # MLA-NoPE 的零 RoPE 补齐
         if self.qk_rope_head_dim == 0:
             rope_dim = 64
             zero_rope_cache = decode_meta.nope_zero_rope_cache
@@ -2532,6 +2586,7 @@ class AscendMLAImpl(MLAAttentionImpl):
             q_pe = _mla_nope_zero_rope(q_nope, rope_dim, zero_rope_cache)
             k_pe = _mla_nope_zero_rope(k_nope, rope_dim, zero_rope_cache)
 
+        # 组装 FIA 公共参数
         common_kwargs = {
             "num_query_heads": self.num_heads_padded,
             "num_key_value_heads": self.num_kv_heads,
@@ -2546,6 +2601,8 @@ class AscendMLAImpl(MLAAttentionImpl):
         }
         common_kwargs["query_rope"] = q_pe
         common_kwargs["key_rope"] = k_pe
+        
+        # 量化
         if self.fa_quant_layer:
             extra_fa_args = {
                 "query_quant_mode": 3,
@@ -2556,24 +2613,42 @@ class AscendMLAImpl(MLAAttentionImpl):
                 "dequant_scale_value": self.fak_descale_float,
             }
             common_kwargs.update(extra_fa_args)
+        
+        # _EXTRA_CTX 全局变量
+        # 一个草稿模型
         if _EXTRA_CTX.is_draft_model:
+            # 草稿模型 prefill
             if _EXTRA_CTX.is_draft_model_prefill:
                 graph_params = get_draft_graph_prefill_params()
+            # 草稿模型 decode
             else:
                 graph_params = get_draft_graph_params()
+        # 主模型
         else:
             graph_params = get_graph_params()
+        
+        # 正在捕获状态
         if _EXTRA_CTX.capturing:
+            # 得到流
             stream = torch_npu.npu.current_stream()
-
+            
+            # 事件
             event = torch.npu.ExternalEvent()
             event.wait(stream)
+            
+            # 重置
             event.reset(stream)
+
             graph_params.events[num_tokens].append(event)
 
+            # workspaces
             workspace = graph_params.workspaces.get(num_tokens)
+
+            # 空张量
             attn_output = torch.empty(attn_output_shape, dtype=q_pe.dtype, device=q_pe.device)
             softmax_lse = torch.empty(num_tokens, dtype=q_pe.dtype, device=q_pe.device)
+            
+            # 注意力参数
             attn_params = (
                 weak_ref_tensors(q_nope),
                 weak_ref_tensors(k_nope),
@@ -2592,31 +2667,45 @@ class AscendMLAImpl(MLAAttentionImpl):
                 weak_ref_tensors(attn_output),
                 weak_ref_tensors(softmax_lse),
             )
+
+
             if self.fa_quant_layer:
                 attn_params = attn_params + (
                     weak_ref_tensors(dequant_scale_q_nope),
                     weak_ref_tensors(self.fak_descale_float),
                 )  # type: ignore
             else:
+                # 
                 attn_params = attn_params + (None, None)  # type: ignore
 
+            # 空的
             if workspace is None:
+                # 申请一个
+                # PTA workspace
                 workspace = torch_npu._npu_fused_infer_attention_score_v2_get_max_workspace(
                     q_nope, k_nope, k_nope, **common_kwargs
                 )
+
+                # 解耦，提到外面
                 if _EXTRA_CTX.is_draft_model:
                     update_draft_graph_params_workspaces(num_tokens, workspace)
                 else:
                     update_graph_params_workspaces(num_tokens, workspace)
+            
 
             graph_params.attn_params[num_tokens].append(attn_params)
 
+            # pta
             torch.npu.graph_task_group_begin(stream)
+            # 传递参数
             torch_npu.npu_fused_infer_attention_score_v2.out(
                 q_nope, k_nope, k_nope, **common_kwargs, workspace=workspace, out=[attn_output, softmax_lse]
             )
             handle = torch.npu.graph_task_group_end(stream)
+            
             graph_params.handles[num_tokens].append(handle)
+        
+        # eager
         else:
             attn_output, _ = torch_npu.npu_fused_infer_attention_score_v2(q_nope, k_nope, k_nope, **common_kwargs)
 

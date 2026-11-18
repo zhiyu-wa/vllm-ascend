@@ -153,11 +153,13 @@ class ACLGraphWrapper:
         # in case we need to access the original runnable.
         return self.runnable
 
+    # 模型前向
     def __call__(self, *args, **kwargs):
         forward_context = get_forward_context()
         batch_descriptor = forward_context.batch_descriptor
         aclgraph_runtime_mode = forward_context.cudagraph_runtime_mode
-
+        
+        # eager
         if aclgraph_runtime_mode == CUDAGraphMode.NONE or aclgraph_runtime_mode != self.runtime_mode:
             # CUDAGraphMode.NONE could mean the profile run, a warmup run, or
             # running without aclgraphs.
@@ -165,6 +167,7 @@ class ACLGraphWrapper:
             # matches. This enables properly dispatching to the correct
             # CUDAGraphWrapper when nesting multiple instances with different
             # runtime modes.
+            # 原样
             return self.runnable(*args, **kwargs)
 
         if batch_descriptor not in self.concrete_aclgraph_entries:
@@ -173,6 +176,7 @@ class ACLGraphWrapper:
 
         entry = self.concrete_aclgraph_entries[batch_descriptor]
 
+        # aclgraph
         if entry.aclgraph is None:
             if self.aclgraph_options.debug_log_enable:
                 # Since we capture aclgraph for many different shapes and
@@ -207,6 +211,7 @@ class ACLGraphWrapper:
                 get_offloader().sync_prev_onload()
                 forward_context.capturing = True
                 try:
+                    # with 
                     with torch.npu.graph(aclgraph, pool=self.graph_pool):
                         # `output` is managed by pytorch's aclgraph pool
                         with super_kernel_scope("full_model", self.enable_super_kernel):
@@ -224,6 +229,7 @@ class ACLGraphWrapper:
                             # the output of the last graph will not be used by
                             # any other acl graph.
                             output = weak_ref_tensors(output)
+
                 except RuntimeError as exc:
                     if _is_old_hdk_capture_error(exc):
                         raise RuntimeError(
@@ -297,6 +303,7 @@ class ACLGraphWrapper:
         if self.runtime_mode == CUDAGraphMode.FULL and use_updatable_graph(self.attn_backend):
             self._updatable_graph_replay(forward_context, entry.aclgraph)
         else:
+            # 重放
             entry.aclgraph.replay()
         logger.info_once("ACL graph replay is active (logged once).")
         return entry.output
@@ -346,7 +353,9 @@ def update_full_graph_params(
     from vllm.config import set_current_vllm_config
 
     with set_current_vllm_config(vllm_config):
+        # AscendMLABackend
         impl_cls = attn_backend.get_impl_cls()
+        # AscendMLAImpl
         impl_cls.update_graph_params(
             update_stream,
             forward_context,

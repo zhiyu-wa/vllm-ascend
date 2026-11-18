@@ -198,6 +198,7 @@ class NPUWorker(WorkerBase):
         self._pp_send_work: list[Handle] = []
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
+        # 注册 SIGTERM/SIGINT handler
         if ascend_compilation_config.enable_npugraph_ex and ascend_compilation_config.enable_static_kernel:
             # Prevent duplicate triggers, execute the exit logic only once
             shutdown_request = False
@@ -215,6 +216,8 @@ class NPUWorker(WorkerBase):
             signal.signal(signal.SIGTERM, signal_handler)
             signal.signal(signal.SIGINT, signal_handler)
 
+
+    # 加非阻塞文件锁，后台执行 ai_core/uninstall.sh
     def uninstall_static_kernel(self):
         import fcntl
         import os
@@ -565,6 +568,7 @@ class NPUWorker(WorkerBase):
         num_blocks = plan.get_num_blocks(available_bytes)
         return num_blocks * sum(spec.page_size_bytes for spec in plan.logical_cache_spec.values())
 
+    # 测显存
     @torch.inference_mode()
     def determine_available_memory(self) -> int:
         """Profiles the peak memory usage of the model to determine how much
@@ -574,6 +578,7 @@ class NPUWorker(WorkerBase):
         Then, it calculates the free memory that can be used for KV cache in
         bytes.
         """
+        # 单位换算
         GiB = lambda b: b / GiB_bytes
 
         maybe_apply_startup_plan(self)
@@ -604,6 +609,7 @@ class NPUWorker(WorkerBase):
             self.init_snapshot,
             weights_memory=int(self.model_runner.model_memory_usage),
         ) as profile_result:
+            # 跑一次测显存
             self.model_runner.profile_run()
 
             # Record torch peak INSIDE the context and BEFORE graph capture,

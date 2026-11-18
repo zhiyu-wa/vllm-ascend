@@ -85,12 +85,20 @@ def _configure_backend(
     vllm_config: VllmConfig,
     process_kwargs_options: Callable | None = None,
 ) -> None:
+
+    # AscendCompiler 是 torch.compile 的后端
+    # static_kernel 只是传给这个后端的一个编译选项
+    
+    # 设置 LOCAL_WORLD_SIZE
     if ascend_compilation_config.enable_static_kernel and "LOCAL_WORLD_SIZE" not in os.environ:
         # External DP config counts one replica; runtime topology includes all local ranks.
         # shortcut: uniform workers and contiguous node ranks; revisit for other layouts.
         parallel_config = vllm_config.parallel_config
+        # 计算 ws*dp
         actual_local_world_size = parallel_config.local_world_size * parallel_config.data_parallel_size_local
+        
         topology_source = "parallel_config"
+        
         if parallel_config.data_parallel_external_lb:
             from vllm.distributed.parallel_state import get_node_count
 
@@ -102,6 +110,7 @@ def _configure_backend(
             if remainder:
                 raise RuntimeError("Static compilation requires worker world size divisible by node count")
             topology_source = f"runtime_world_size={runtime_world_size}, node_count={node_count}"
+        
         os.environ["LOCAL_WORLD_SIZE"] = str(actual_local_world_size)
         logger.info_once(
             "Setting LOCAL_WORLD_SIZE=%d for static kernel "
@@ -113,6 +122,7 @@ def _configure_backend(
             scope="global",
         )
 
+    # npugraph_ex
     if process_kwargs_options is not None:
         # npugraph_ex (both old and new): build options dict and use _process_kwargs_options.
         # It maps flat option names to nested config paths for old versions,
@@ -125,6 +135,7 @@ def _configure_backend(
             "clone_input": False,
             "clone_output": False,
         }
+        # 开启 static_kernel
         if ascend_compilation_config.enable_static_kernel:
             logger.info_once(
                 "enable_static_kernel is enabled, static shape kernel will be used to accelerate aclgraph execution.",
@@ -133,12 +144,14 @@ def _configure_backend(
             options["static_kernel_compile"] = True
             # Set sym_range to limit static kernel compilation to specified batch sizes.
             options["_vllm_aclnn_static_kernel_sym_range"] = _compute_decode_cudagraph_batch_sizes(vllm_config)
+            # 开启 static_kernel
             if ascend_compilation_config.enable_super_kernel:
                 options["super_kernel_optimize"] = True
                 options["super_kernel_optimize_options"] = {
                     "dcci_after_kernel_end": [".*"],
                 }
         process_kwargs_options(config, {"options": options})
+    # torchair
     else:
         # torchair (reduce-overhead): use nested config structure directly.
         # mode="reduce-overhead": use aclgraph mode, avoid fx graph to Ascend IR transformation.
@@ -234,6 +247,7 @@ def npugraph_ex_compile(
         return compiled_fn, None
 
 
+# CompilerInterface 是 vLLM 上游定义的编译器接口
 class AscendCompiler(CompilerInterface):
     """
     AscendCompiler is a custom compiler interface for the Ascend platform.
@@ -243,6 +257,7 @@ class AscendCompiler(CompilerInterface):
 
     name = "AscendCompiler"
 
+    # 为 torch.compile 的编译缓存生成 key
     # TODO(wxs): add passes related to compilation in compute_hash
     def compute_hash(self, vllm_config: VllmConfig) -> str:
         self.vllm_config = vllm_config
@@ -260,10 +275,12 @@ class AscendCompiler(CompilerInterface):
         logger.info("AscendCompiler hash factors: %s", factors)
         return sha256(str(factors).encode(), usedforsecurity=False).hexdigest()[:10]
 
+    # 传入缓存目录
     def initialize_cache(self, cache_dir, disable_cache=False, prefix=""):
         self.cache_dir = cache_dir
         self.disable_cache = disable_cache
 
+    # 编译入口
     def compile(
         self,
         graph: fx.GraphModule,
@@ -274,6 +291,8 @@ class AscendCompiler(CompilerInterface):
     ) -> tuple[Callable | None, Any | None]:
         # inductor can inplace modify the graph, so we need to copy it
         # see https://github.com/pytorch/pytorch/issues/138980
+
+        # 深拷贝
         graph = copy.deepcopy(graph)
 
         from torch._guards import detect_fake_mode
@@ -292,6 +311,8 @@ class AscendCompiler(CompilerInterface):
             ]
 
         ascend_compilation_config = get_ascend_config().ascend_compilation_config
+
+        # 走 npugraph_ex 后端
         if ascend_compilation_config.enable_npugraph_ex:
             cache_dir = None if getattr(self, "disable_cache", False) else getattr(self, "cache_dir", None)
             logger.info_once(
@@ -309,9 +330,11 @@ class AscendCompiler(CompilerInterface):
                 key,
                 cache_dir,
             )
+        # 本地 fusion pass 
         else:
             return fusion_pass_compile(graph, example_inputs, compiler_config, compile_range, key)
 
+    # 缓存加载
     def load(self, handle, graph, example_inputs, graph_index, compile_range):
         key, path = handle
         # Cache file may be absent when the graph was skipped at save time (e.g. it

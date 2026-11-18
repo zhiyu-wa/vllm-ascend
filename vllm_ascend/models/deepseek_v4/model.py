@@ -933,6 +933,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         if self.use_sequence_parallel_moe:
             if envs.VLLM_MOE_SKIP_PADDING and is_forward_context_available():
                 forward_context = get_forward_context()
+                # 执行 padding
                 forward_context.is_padding = sp_padding_mask(forward_context.is_padding, hidden_states)
             hidden_states = sp_shard(hidden_states)
             # Non-first PP ranks receive None input_ids (the embedding was
@@ -1100,6 +1101,7 @@ class AscendDeepseekV4ForCausalLM(nn.Module, SupportsPP, DeepseekV2MixtureOfExpe
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        # 模型入口
         hidden_states = self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
         return hidden_states
 

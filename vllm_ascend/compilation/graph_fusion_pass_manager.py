@@ -23,6 +23,12 @@ from vllm.config import VllmConfig
 
 from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_hardware_profile
 
+"""
+fusion   pass
+算子融合  编译器术语: 对FX图做一遍遍历和变换
+
+GraphFusionPassManager 就是管理一组这种变换的 pass manager
+"""
 
 class GraphFusionPassManager:
     """
@@ -30,17 +36,24 @@ class GraphFusionPassManager:
     It handles the configuration and execution of passes.
     The counterpart in vllm is PostGradPassManager. Since torch_npu
     does not support triton for now, we define our own pass manager.
+
+    一个用于图融合 pass 的 pass 管理器。
+    它负责 pass 的配置和执行。
+    它在 vLLM 中的对应物是 PostGradPassManager。由于 torch_npu 目前不支持 Triton，我们定义了自己的 pass 管理器。
     """
 
     def __init__(self):
         self.passes: list[VllmInductorPass] = []
 
+    # 执行 pass
     def __call__(self, graph: fx.Graph) -> fx.Graph:
         compile_range = get_pass_context().compile_range
 
         for pass_ in self.passes:
             if pass_.is_applicable_for_range(compile_range):
                 pass_(graph)
+        
+        # 所有 pass 跑完后 graph.recompile() 重新生成 FX 图的 Python 代码
         graph.recompile()
         return graph
 
@@ -48,13 +61,20 @@ class GraphFusionPassManager:
         assert isinstance(pass_, VllmInductorPass)
         self.passes.append(pass_)
 
+    # 决定启用哪些 pass
+    # 还有torch.compile 自带的融合
+    # npugraph_ex / torchair 后端的融合
     def configure(self, config: VllmConfig):
         from vllm_ascend.ascend_config import get_ascend_config
 
         # Consume the recursively validated config rather than re-reading the
         # raw additional_config dict (where e.g. "false" is truthy).
+
+        # 读取已校验的配置
         self.ascend_compilation_config = get_ascend_config().ascend_compilation_config
         profile = get_current_hardware_profile()
+        
+        # 按「配置开关 + 芯片能力」
         if self.ascend_compilation_config.fuse_norm_quant and profile.supports(
             HardwareCapability.GRAPH_NORM_QUANT_FUSION
         ):

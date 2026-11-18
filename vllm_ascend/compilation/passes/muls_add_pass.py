@@ -51,6 +51,7 @@ class MulsAddPattern(BasePattern):
         # pattern instance (self.scale) instead of being passed as an input.
         return [x, y]
 
+    # 模式匹配
     def get_pattern(self):
         def pattern(x: torch.Tensor, y: torch.Tensor):
             """
@@ -62,6 +63,7 @@ class MulsAddPattern(BasePattern):
 
         return pattern
 
+    # 替换
     def get_replacement(self):
         def replacement(x: torch.Tensor, y: torch.Tensor):
             """
@@ -86,6 +88,7 @@ class MulsAddFusionPass(VllmInductorPass):
         # For now we enable this pass for all floating-point dtypes that the
         # model is configured to use.
         dtype = vllm_config.model_config.dtype
+        # 此时 pattern_match_passes 是空的，apply 时匹配 0 次，等于静默禁用
         if dtype not in (torch.float16, torch.bfloat16, torch.float32):
             logger.debug("MulsAdd fusion not enabled: unsupported dtype %s", dtype)
             return
@@ -93,6 +96,7 @@ class MulsAddFusionPass(VllmInductorPass):
         routed_scaling_factor = getattr(vllm_config.model_config.hf_text_config, "routed_scaling_factor", 1.0)
         MulsAddPattern(vllm_config, scale=routed_scaling_factor).register(self.pattern_match_passes)
 
+    # 执行匹配替换
     def __call__(self, graph: torch.fx.Graph) -> None:  # type: ignore[override]
         self.begin()
         self.matched_count = self.pattern_match_passes.apply(graph)

@@ -570,6 +570,7 @@ class NPUModelRunner(GPUModelRunner):
     ):
         self._cpp_execution_time_ms = None
         profiling_config = self.ascend_config.scheduler_config.profiling_chunk_config
+        # 设置性能计时
         execution_start_time = _start_profiling_chunk_timing(
             profiling_config,
             scheduler_output,
@@ -691,7 +692,10 @@ class NPUModelRunner(GPUModelRunner):
 
     @torch.inference_mode()
     def profile_run(self, randomize_inputs: bool = False) -> None:
-        """Override GPUModelRunner.profile_run for Ascend NPUs.
+        """
+        探测模型运行时的峰值显存
+        最大的 batch 跑一次 _dummy_run
+        Override GPUModelRunner.profile_run for Ascend NPUs.
         When running moe models, we need an extra dummy run with mc2_tokens_capacity tokens to reserve
         necessary HCCL buffer for the MC2 operator before standard `profile_run`. Additionally, we set
         override_mrv2_in_profile_run to True to force moe load to be balanced when executing `profile_run`
@@ -714,6 +718,8 @@ class NPUModelRunner(GPUModelRunner):
                 in {MoECommType.MC2, MoECommType.FUSED_MC2}
             ):
                 # Use a call-scoped bypass because skip_compiled would require runner-specific ForwardContext plumbing.
+                # 被 disable_compilation 包裹
+                # 禁用编译
                 with disable_compilation(self.get_model()):
                     self._dummy_run(
                         mc2_tokens_capacity,
@@ -729,6 +735,7 @@ class NPUModelRunner(GPUModelRunner):
                 self.max_num_tokens = global_max_num_tokens
 
     def gather_batch_req_state(self, scheduler_output: SchedulerOutput, dummy_run: bool):
+        # 调用 vLLM 上游实现完成聚合
         batch_state, uniform_token_count = super().gather_batch_req_state(scheduler_output, dummy_run)
         kv_cfg = self.vllm_config.kv_transfer_config
         is_pd_decode_node = kv_cfg is not None and kv_cfg.is_kv_consumer and not kv_cfg.is_kv_producer
@@ -737,11 +744,20 @@ class NPUModelRunner(GPUModelRunner):
         # for the entire batch; see https://github.com/vllm-project/vllm/pull/58400.
         # This PD-only reclassification is a temporary workaround. Replace it with
         # a dedicated graph-eligibility check once the upstream semantics are aligned.
+
+        # super() 已算出 mask=[True], eligible=True, uniform=4
+
+        # 真实批次
+        # PD 分离中的decode端 + recompute_scheduler_enable
         if batch_state is not None and is_pd_decode_node:
             pd_decode_recompute = (
+                # 如果上游把它标成了 prefill
                 batch_state.is_prefilling_np
+                # 已经算过一部分 prompt
                 & (batch_state.num_computed_prefill_tokens_np > 0)
+                # 本步调度的 token 数正好等于一次 decode query 的长度
                 & (batch_state.num_scheduled_tokens == self.decode_query_len)
+                # 本批次是 prefill 的"最后一小截"
                 & (
                     batch_state.num_computed_prefill_tokens_np + batch_state.num_scheduled_tokens
                     >= batch_state.prefill_len_np
@@ -750,6 +766,7 @@ class NPUModelRunner(GPUModelRunner):
             if np.any(pd_decode_recompute):
                 batch_state.is_prefilling_np[pd_decode_recompute] = False
                 has_prefill = bool(batch_state.is_prefilling_np.any())
+                # 因为分类变了，必须重新计算 uniform decode token 数
                 decode_graph_eligible = not has_prefill
                 if batch_state.prefill_runs_as_decode_np is not None:
                     decode_graph_eligible = bool(
@@ -1008,6 +1025,7 @@ class NPUModelRunner(GPUModelRunner):
             num_computed_prefill_tokens_np=batch_req_state.num_computed_prefill_tokens_np,
             is_prefilling_np=batch_req_state.is_prefilling_np,
             has_prefill=batch_req_state.has_prefill,
+            # 没有 prefill_runs_as_decode_np
             decode_graph_eligible=batch_req_state.decode_graph_eligible,
             prefill_runs_as_decode_np=batch_req_state.prefill_runs_as_decode_np,
             **pp_kwargs,

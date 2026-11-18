@@ -148,6 +148,15 @@ class UpdatableGraph(torch.npu.NPUGraph):
         self,
         source: ParamSource,
     ) -> tuple[GraphUpdateTask, ...]:
+        """
+        p1 [u1 ,u2, u3, u4 ,   u5,u6, u7, u8,   u9,u10, u11, u12,u13]
+        p2 [u1 ,u2, u3, u4 ,   u5,u6, u7, u8,   u9,u10, u11, u12,u13]
+        p3 [u1 ,u2, u3, u4 ,   u5,u6, u7, u8,   u9,u10, u11, u12,u13]
+        p4 [u1 ,u2, u3, u4 ,   u5,u6, u7, u8,   u9,u10, u11, u12,u13]
+
+        task:
+        p1 1 p2 1 p3 1 p4 1 ; p1 2 p2 2 p3 2 p4 2 ;p1 3 p2 3 p3 3 p4 3
+        """
         params_by_provider = {provider: source.get(provider) for provider in self.provider_sizes}
         for provider, size in self.provider_sizes.items():
             assert len(params_by_provider[provider]) == size

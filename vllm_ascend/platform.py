@@ -200,6 +200,7 @@ class NPUPlatform(Platform):
         Get the custom compile backend. Previously, we used EagerAdaptor by default.
         To use graph fusion operations, we defined our own backend compiler.
         """
+        # AscendCompiler 是 torch.compile 的后端
         return "vllm_ascend.compilation.compiler_interface.AscendCompiler"
 
     @classmethod
@@ -1326,6 +1327,7 @@ def _setup_compile_backend(
             update_cudagraph_capture_sizes(vllm_config, sp_aclgraph_sizes)
 
     # Get custom compile backend for graph fusion
+    # 当 use_inductor=False 时，vLLM 的编译流水线不用 Inductor，而是按这个字符串路径动态 import 并实例化 AscendCompiler
     compilation_config.oot_compiler = compile_backend
     compilation_config.use_inductor = False
     if compilation_config.cudagraph_mode == CUDAGraphMode.NONE:

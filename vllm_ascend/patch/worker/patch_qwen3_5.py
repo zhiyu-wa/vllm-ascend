@@ -47,6 +47,7 @@ def _uses_multimodal_rope(attention: Qwen3NextAttention) -> bool:
 
 class AscendQwen3NextAttention(Qwen3NextAttention):
     def forward(self, positions: torch.Tensor, hidden_states: torch.Tensor, output: torch.Tensor = None):
+        # aclnnQuantMatmulWeightNz_QuantBatchMatmulV3_QuantBatchMatmulV3
         qkv, _ = self.qkv_proj(hidden_states)
         if _uses_multimodal_rope(self):
             # MRV2 MTP uses 1D text positions; the fused kernel reads three planes.
@@ -58,6 +59,7 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
             if cos_sin.dtype != qkv.dtype:
                 cos_sin = cos_sin.to(qkv.dtype)
 
+            # 切出q,k,v 做 rmsnorm  旋转
             q, k, v, gate = torch.ops.vllm.triton_split_qkv_rmsnorm_mrope(
                 qkv=qkv,
                 q_weight=1.0 + self.q_norm.weight,
@@ -88,12 +90,15 @@ class AscendQwen3NextAttention(Qwen3NextAttention):
 
             q, k = self.rotary_emb(positions, q, k)
 
+        # FusedInferAttentionScore
+        # attention_v1
         attn_output = self.attn(q, k, v)
 
         if self.attn_output_gate:
             gate = torch.sigmoid(gate)
             attn_output = attn_output * gate
 
+        # aclnnMatmul_MatMulV3Common_MatMulV3
         out, _ = self.o_proj(attn_output)
         if output is not None:
             output[:] = out

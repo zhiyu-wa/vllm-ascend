@@ -768,6 +768,7 @@ class AscendSpecDecodeBaseProposer(SpecDecodeBaseProposer):
                 draft_index,
             )
             for layer_name in attn_group.layer_names:
+                # 对于每层
                 per_layer_attn_metadata[layer_name] = attn_metadata
         return per_layer_attn_metadata
 

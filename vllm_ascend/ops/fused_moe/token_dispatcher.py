@@ -342,6 +342,7 @@ class TokenDispatcherWithAllGather(MoETokenDispatcher[MoEAllGatherCombineMetadat
             num_experts_local.item() if torch.is_tensor(num_experts_local) else int(num_experts_local)
         )
 
+    # 分发token
     def token_dispatch(
         self,
         token_dispatch_input: MoETokenDispatchInput,

@@ -360,20 +360,33 @@ class MembPullSendingThread(threading.Thread):
         layer_meta = self._state.layer_metadata[layer_name]
         layer_has_indexer = layer_meta.has_indexer
 
+        # P 侧 KV Cache 发送线程
         def _blocks_for_chunk(rm, group_idx: int) -> tuple[list[int], int]:
+            # request metadata
+            # 返回元组：本 chunk 要发的 block id 列表 + 起始 block 编号
+
+            # 取该请求在这个 group 下已分配的全部本地物理 block id 列表
             all_block_ids = rm.local_block_ids[group_idx] if len(rm.local_block_ids) > group_idx else []
+            # 从引擎状态中读取该 group 每个 block 能容纳的 token 数 如128 tokens/block
             block_size = self._state.block_sizes[group_idx]
+            # 计算"已经传给 D 侧多少 token"
             transferred_tokens = max(
                 int(getattr(rm, "remote_cache_tokens", 0) or 0),
                 int(rm.local_transed_tokens or 0),
                 0,
             )
+            # 向下取整作为本次传输的起始 block
             start_block = transferred_tokens // block_size
+            # 读取 P 侧当前已经计算完成的 token 总数
             computed_tokens = max(int(rm.local_computed_tokens or 0), 0)
+            
             if rm.chunk_finish:
+                # chunk结束，向上取整
                 end_block = (computed_tokens + block_size - 1) // block_size
             else:
+                # 未结束，向下取整，只发送完全写满的 block
                 end_block = computed_tokens // block_size
+            
             if end_block > len(all_block_ids):
                 raise RuntimeError(
                     f"MembPull P chunk block range exceeds allocation for group {group_idx}: "
