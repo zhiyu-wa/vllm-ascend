@@ -18,9 +18,12 @@
 from typing import Any
 
 # Registry: maps (quant_type, layer_type) -> SchemeClass
+# 
 _SCHEME_REGISTRY: dict[tuple[str, str], type[Any]] = {}
 
 
+# 每个 scheme 类定义时上面挂一个 @register_scheme(...)，模块被 import 时就自动注册进字典
+# register_scheme 装饰器自动注册
 def register_scheme(quant_type: str, layer_type: str):
     """Decorator to register a quantization scheme.
 
@@ -39,16 +42,21 @@ def register_scheme(quant_type: str, layer_type: str):
 
     def decorator(cls: type[Any]) -> type[Any]:
         key = (quant_type, layer_type)
+
+        # 重复注册报错
         if key in _SCHEME_REGISTRY:
             raise ValueError(
                 f"Scheme already registered for {quant_type}/{layer_type}: {_SCHEME_REGISTRY[key].__name__}"
             )
+        # 把类写进注册表
         _SCHEME_REGISTRY[key] = cls
         return cls
 
     return decorator
 
 
+# 量化方案的查表器
+# 用(quant_type, layer_type) 从注册表找出对应的scheme 类
 def get_scheme_class(quant_type: str, layer_type: str) -> type[Any] | None:
     """Get scheme class for given quant_type and layer_type.
 

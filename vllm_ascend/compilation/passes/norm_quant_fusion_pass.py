@@ -27,6 +27,12 @@ from vllm_ascend.device.hardware_profile import HardwareCapability, get_current_
 from vllm_ascend.utils import enable_custom_op
 
 
+
+# 多 种“norm 后半截”的组合
+# 融合 = npu_add_rms_norm_bias + 某种量化
+
+
+# 无 bias + 静态 INT8 量化
 class AddRMSNormQuantPattern(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         super().__init__(vllm_config, eps)
@@ -55,11 +61,13 @@ class AddRMSNormQuantPattern(BasePattern):
             """
             Pattern for AddRMSNormQuant fusion.
             """
+            # 无 bias 版：RMSNorm 的加性偏置
             output = torch.ops._C_ascend.npu_add_rms_norm_bias(
                 rms_norm_input, residual, rms_norm_weight, None, self.eps
             )
             out0 = output[0]
             out1 = output[2]
+            # 自定义算子
             quantized_output = torch.ops.vllm.quantize(out0, scale, scale_reciprocal, offset)
             return quantized_output, out1
 
@@ -77,16 +85,24 @@ class AddRMSNormQuantPattern(BasePattern):
             """
             Replacement for the AddRMSNormQuant fusion.
             """
+            # 残差 + RMS归一化 + 量化
             output = torch.ops.npu.npu_add_rms_norm_quant(
-                rms_norm_input, residual, rms_norm_weight, scale, offset, epsilon=self.eps
+                rms_norm_input,             # hidden states
+                residual,                   # 残差
+                rms_norm_weight,            # rms_norm的权重 weight 
+                scale,                      # 量化的scale 放大倍数，把浮点世界的小数，换算成整数世界的"格数"
+                offset,                     # 量化的零点，平移量
+                epsilon=self.eps            # 防止除以 0
             )
-            quantized_output = output[0]
-            out1 = output[2]
+            
+            quantized_output = output[0]    # 量化后的 norm 结果
+            out1 = output[2]                # 更新后的残差
             return quantized_output, out1
 
         return replacement
 
 
+# 有 bias + 静态 INT8
 class AddRMSNormQuantPatternWithBias(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         super().__init__(vllm_config, eps)
@@ -150,6 +166,7 @@ class AddRMSNormQuantPatternWithBias(BasePattern):
         return replacement
 
 
+# 无 bias + 动态 INT8
 class AddRMSNormDynamicQuantPattern(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         super().__init__(vllm_config, eps)
@@ -193,6 +210,7 @@ class AddRMSNormDynamicQuantPattern(BasePattern):
         return replacement
 
 
+# 有 bias + 动态 INT8
 class AddRMSNormDynamicQuantPatternWithBias(BasePattern):
     def __init__(self, vllm_config: VllmConfig, eps: float = 1e-6):
         super().__init__(vllm_config, eps)
@@ -237,6 +255,7 @@ class AddRMSNormDynamicQuantPatternWithBias(BasePattern):
             """
             Replacement for the AddRMSNormQuant fusion.
             """
+            # 遇到上面这个 op 序列就替换成下面的融合算子
             output = torch.ops.npu.npu_add_rms_norm_dynamic_quant(
                 rms_norm_input, residual, rms_norm_weight, epsilon=self.eps, output_mask=[True, False], beta=bias
             )
@@ -364,13 +383,17 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
 
     def __init__(self, vllm_config: VllmConfig):
         super().__init__(vllm_config)
+        # 每个 pass 实例一个 matcher
         self.pattern_match_passes: PatternMatcherPass = PatternMatcherPass(pass_name="rmsnorm_quant_fusion_pass")
 
+        # 模型 dtype 必须是 bf16/fp16
         dtype = vllm_config.model_config.dtype
         if dtype not in (torch.bfloat16, torch.float16):
             logger.debug("Quant fusion not enabled: unsupported dtype %s", dtype)
+            # matcher 保持空 pass 注册了但不会替换任何东西
             return
 
+        # W4A4 模型直接 return
         if _model_uses_w4a4_quant(vllm_config):
             logger.debug(
                 "Quant fusion not enabled: the model contains "
@@ -379,25 +402,39 @@ class AddRMSNormQuantFusionPass(VllmInductorPass):
             )
             return
 
+        # 同一套 pattern 按两个 eps 各注册一遍，因为 FX 图里 eps 是常量，不同值要分别匹配
         common_epsilons = [1e-5, 1e-6]
         profile = get_current_hardware_profile()
 
         for eps in common_epsilons:
+            
+            # 无条件注册 AddRMSNormDynamicQuantPattern
+            # 最基础的 dynamic INT8 融合
             AddRMSNormDynamicQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
+            
+            # 只有硬件支持 DYNAMIC_MX_QUANT_FUSION 
+            # 才注册两条 MX（FP8）路径
             if profile.supports(HardwareCapability.DYNAMIC_MX_QUANT_FUSION):
                 AddRMSNormDynamicMXQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
                 RMSNormDynamicMXQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
+            
+            # 只有 enable_custom_op() 当前环境能不能安全使用自定义算子库 为真，
+            # 才注册四条 static/带 bias 的 INT8 pattern
             if enable_custom_op():
                 AddRMSNormQuantPattern(vllm_config, eps=eps).register(self.pattern_match_passes)
                 AddRMSNormQuantPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
                 AddRMSNormDynamicQuantPatternWithBias(vllm_config, eps=eps).register(self.pattern_match_passes)
 
     def __call__(self, graph: torch.fx.Graph):
+        # 传入FX图
         self.begin()
+        # 统计匹配数量
         self.matched_count = self.pattern_match_passes.apply(graph)
+        # 打印
         logger.debug("Replaced %s patterns", self.matched_count)
         self.end_and_log()
 
+    # 这个 pass 对 prefill / decode / speculator 所有 compile range 都执行
     def is_applicable_for_range(self, compile_range: Range) -> bool:
         """
         Check if the pass is applicable for the current configuration.

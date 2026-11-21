@@ -949,6 +949,8 @@ def register_ascend_customop(vllm_config: VllmConfig | None = None):
         REGISTERED_ASCEND_OPS["GatedDeltaNetAttention"] = AscendGatedDeltaNetAttention
 
     for name, op_cls in REGISTERED_ASCEND_OPS.items():
+        # "RMSNorm": AscendRMSNorm
+        # "QKVParallelLinear": AscendQKVParallelLinear
         CustomOp.register_oot(_decorated_op_cls=op_cls, name=name)
 
     # NOTE: Keep this at last to ensure all custom actions are registered

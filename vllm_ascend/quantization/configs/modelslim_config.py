@@ -341,6 +341,7 @@ def create_scheme_for_layer(
         raise ValueError(err_msg)
 
     # Use registry to get scheme class
+    # 获取量化类
     scheme_cls = get_scheme_class(quant_type, layer_type)
     if scheme_cls is not None:
         return scheme_cls()
@@ -354,6 +355,9 @@ def create_scheme_for_layer(
     raise NotImplementedError(err_msg % (quant_type, layer_type))
 
 
+# 启动参数 --quantization ascend
+# 或 checkpoint 里 quant_method="ascend"
+# ASCEND_QUANTIZATION_METHOD = "ascend"
 @register_quantization_config(ASCEND_QUANTIZATION_METHOD)
 class AscendModelSlimConfig(QuantizationConfig):
     """Config class for Ascend ModelSlim quantization.
@@ -657,6 +661,7 @@ class AscendModelSlimConfig(QuantizationConfig):
             if shard_names:
                 self.packed_modules_mapping["experts"] = [f"experts.0.{name}" for name in sorted(shard_names)]
 
+    # 获取量化方法
     def get_quant_method(self, layer: torch.nn.Module, prefix: str, tid2eid=None) -> Optional["QuantizeMethodBase"]:
         from ..method_adapters import (
             AscendEmbeddingMethod,
@@ -713,6 +718,8 @@ class AscendModelSlimConfig(QuantizationConfig):
         elif isinstance(layer, AttentionLayerBase):
             if self.is_fa_quant_layer(prefix):
                 fa_quant_type = self.quant_description["fa_quant_type"]
+                
+                # 创建量化方法
                 scheme = create_scheme_for_layer(fa_quant_type, prefix, "attention")
                 logger.debug("Select AscendKVCacheMethod for %s (layer=%s)", prefix, "AttentionLayerBase[fa]")
             elif self.is_indexer_quant_layer(prefix):
@@ -720,6 +727,8 @@ class AscendModelSlimConfig(QuantizationConfig):
                 quant_type = self.quant_description.get(f"{prefix}.indexer.quant_type")
                 if quant_type is None:
                     quant_type = self.quant_description["indexer_quant_type"]
+                
+                # 创建量化方法
                 scheme = create_scheme_for_layer(quant_type, prefix, "attention")
                 logger.debug("Select AscendKVCacheMethod for %s (layer=%s)", prefix, "AttentionLayerBase[indexer]")
             elif self.is_c8_quant_layer(prefix):

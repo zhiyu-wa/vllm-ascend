@@ -97,6 +97,7 @@ def _should_reshape_wo_a_to_3d(prefix: str, dtype: torch.dtype) -> bool:
     return "wo_a" in prefix and (not supports_dynamic_mx_quant_fusion or reshape_bf16_wo_a)
 
 
+# 非量化
 class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
     """Linear method without quantization"""
 
@@ -130,6 +131,7 @@ class AscendUnquantizedLinearMethod(WeightSwitchMixin, UnquantizedLinearMethod):
                 layer.weight.data.view(layer.n_local_groups, layer.o_lora_rank, -1).transpose(2, 1).contiguous()
             )
 
+    # 走非量化路径
     def apply(
         self,
         layer: torch.nn.Module,
@@ -164,7 +166,9 @@ class AscendLinearBase(LinearBase):
         self.params_dtype = params_dtype
         self.quant_config = quant_config
         self.prefix = prefix
+
         if quant_config is None:
+            # Ascend 非量化方法
             self.quant_method: QuantizeMethodBase | None = AscendUnquantizedLinearMethod()
         else:
             self.quant_method = quant_config.get_quant_method(self, prefix=prefix)
@@ -245,6 +249,7 @@ class AscendQKVParallelLinear(QKVParallelLinear):
         if self.custom_op is not None:
             return self.custom_op.apply(input_)
 
+        # 走父类的 
         return super().forward(input_)
 
 

@@ -30,6 +30,7 @@ from ..base import AscendLinearScheme, PreparedLinearInput, WeightSwitchGatherSp
 from ..registry import register_scheme
 
 
+# 注册为量化方法
 @register_scheme("W8A8", "linear")
 class AscendW8A8LinearMethod(AscendLinearScheme):
     """Linear method for Ascend W8A8 static quantization.
@@ -101,6 +102,8 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
         )
         return PreparedLinearInput(quantized_x, None, x.dtype)
 
+    # quant
+    # 调用量化算子 -> _quantize_impl -> torch_npu.npu_quantize -> aclnnAscendQuantV3_AscendQuantV2Aicore_AscendQuantV2
     def apply(
         self,
         layer: torch.nn.Module,
@@ -108,10 +111,11 @@ class AscendW8A8LinearMethod(AscendLinearScheme):
         bias: torch.Tensor | None = None,
         tp_rank: int | None = 0,
     ) -> torch.Tensor:
+
         if isinstance(x, PreparedLinearInput):
             x = x.quantized
         elif x.dtype != torch.int8:
-            # quant
+            
             x = torch.ops.vllm.quantize(
                 x,
                 layer.aclnn_input_scale,

@@ -87,6 +87,10 @@ class AscendRMSNorm(RMSNorm):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         import torch_npu
 
+        if quant_activation:
+            return torch.ops.npu.npu_add_rms_norm_dynamic_quant
+
+        # 上游传递两个参数
         # 有残差，走融合算子
         if residual is not None:
             import vllm_ascend.vllm_ascend_C  # type: ignore[import-untyped]  # noqa: F401, PLC0415

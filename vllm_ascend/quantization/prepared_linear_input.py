@@ -23,8 +23,23 @@ import torch
 
 @dataclass(frozen=True)
 class PreparedLinearInput:
+    # 在 multistream scheduling barrier 多流调度 之前准备好的量化输入
+    # NPU 上有多个硬件流（stream）可以进行并行
+    # 
     """Quantized input prepared before a multistream scheduling barrier."""
 
     quantized: torch.Tensor
     scale: torch.Tensor | None
     output_dtype: torch.dtype
+
+
+"""
+barrier 是什么 （屏障）
+它不是一种算子，是一种 "等待"
+
+Event_wait
+Event_record
+
+共享专家流在 barrier 前把做量化（和路由流的 Cube 工作重叠），量化产物打包成这个对象穿过 event 等待，barrier 后 apply 直接 GEMM
+
+"""

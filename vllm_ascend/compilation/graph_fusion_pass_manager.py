@@ -79,22 +79,22 @@ class GraphFusionPassManager:
             HardwareCapability.GRAPH_NORM_QUANT_FUSION
         ):
             from .passes.norm_quant_fusion_pass import AddRMSNormQuantFusionPass
-
+            # Norm + Quant
             self.passes.append(AddRMSNormQuantFusionPass(config))
 
         if self.ascend_compilation_config.fuse_qknorm_rope:
             from .passes.qknorm_rope_fusion_pass import QKNormRopeFusionPass
-
+            # QKNorm + Rope
             self.passes.append(QKNormRopeFusionPass(config))
 
         if self.ascend_compilation_config.fuse_muls_add and profile.supports(HardwareCapability.GRAPH_MULS_ADD_FUSION):
             from .passes.muls_add_pass import MulsAddFusionPass
-
+            # Muls + Add
             self.passes.append(MulsAddFusionPass(config))
 
         if config.compilation_config.pass_config.fuse_gemm_comms and profile.supports(
             HardwareCapability.GRAPH_MM_REDUCE_SCATTER_FUSION
         ):
             from .passes.mm_reduce_scatter_fusion_pass import MatmulReduceScatterFusionPass
-
+            # MM + ReduceScatter
             self.passes.append(MatmulReduceScatterFusionPass(config))
