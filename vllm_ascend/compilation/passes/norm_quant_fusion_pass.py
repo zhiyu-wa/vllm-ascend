@@ -184,6 +184,7 @@ class AddRMSNormDynamicQuantPattern(BasePattern):
         def pattern(rms_norm_input: torch.Tensor, residual: torch.Tensor, rms_norm_weight: torch.Tensor):
             """
             Pattern for AddRMSNormQuant fusion.
+            qwen3.8-dense 
             """
             output = torch.ops.npu.npu_add_rms_norm(rms_norm_input, residual, rms_norm_weight, self.eps)
             out0 = output[0]
