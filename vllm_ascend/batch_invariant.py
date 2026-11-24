@@ -55,6 +55,8 @@ def add_rms_norm(
 ):
     """AclnnAddRmsNorm can't ensure batch invariant,
     so we need to split it into add and rms_norm.
+    # 该融合算子不能保证批一直性
+    # 需要拆开
     """
     x_ = x + residual
     residual_ = x_
