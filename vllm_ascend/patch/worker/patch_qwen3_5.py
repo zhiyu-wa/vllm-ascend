@@ -228,6 +228,9 @@ class AscendQwen3_5DecoderLayer(Qwen3_5DecoderLayer):
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
+        # self.input_layernorm AscendGemmaRMSNorm()
+        # self.input_layernorm <class 'vllm_ascend.ops.layernorm.AscendGemmaRMSNorm'>
+
         if use_sp:
             # Attention (full and GDN) needs the full token sequence; the
             # sequence-parallel output projection above it leaves partial
