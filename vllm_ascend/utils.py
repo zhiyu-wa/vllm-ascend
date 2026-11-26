@@ -1134,7 +1134,7 @@ def pad_num_tokens(
     return (num_tokens + tp_size - 1) // tp_size * tp_size
 
 
-# 
+# 由GLM-NEXT调用
 def pad_sequence_parallel_tokens(hidden_states: torch.Tensor) -> torch.Tensor:
     """Pad the token dim of ``hidden_states`` up to the TP size.
 
@@ -1144,7 +1144,10 @@ def pad_sequence_parallel_tokens(hidden_states: torch.Tensor) -> torch.Tensor:
     from vllm.distributed import get_tensor_model_parallel_world_size
 
     tp_size = get_tensor_model_parallel_world_size()
+    
+    # 触发源头：一行 Python 取模
     padding = (-hidden_states.shape[0]) % tp_size
+    
     pad = (0, 0) * (hidden_states.ndim - 1) + (0, padding)
     return torch.nn.functional.pad(hidden_states, pad)
 
